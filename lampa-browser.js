@@ -280,10 +280,200 @@
     };
 
     /* ---------------------------------------------------------------- */
+    /* Управление сайтом с пульта: виртуальная мышь или клавиатура      */
+    /* ---------------------------------------------------------------- */
+
+    var KEYS = {
+        up: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+        down: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+        left: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+        right: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+        enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
+        space: { key: ' ', code: 'Space', keyCode: 32 }
+    };
+
+    var CURSOR = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M3 2l17 10-7.5 1.5L17 21l-3 1.5-3.6-7.6L5 20z" fill="#fff" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/>' +
+        '</svg>';
+
+    // Пульт перехватывает Lampa, а не страница (на Apple TV по-другому нельзя), поэтому команды
+    // пересылаются в страницу через postMessage. Исполняет их скрипт, который внедряет прокси.
+    function RemoteControl(overlay, iframe, site, actions) {
+        var _this = this;
+        var cursor = $('<div class="lbrowser-frame__cursor">' + CURSOR + '</div>');
+        var menu = $('<div class="lbrowser-frame__menu hide"></div>');
+        var zoom = site.zoom || 1;
+        var x = Math.round(window.innerWidth / 2);
+        var y = Math.round(window.innerHeight / 2);
+        var held = {};
+        var streak = 0;
+        var lastDir = '';
+        var lastMove = 0;
+        var menuItems = [];
+        var menuIndex = 0;
+
+        this.mode = site.control || 'mouse';
+        this.okKey = site.okKey || 'enter';
+
+        overlay.append(cursor).append(menu);
+
+        var send = this.send = function (msg) {
+            try { iframe.contentWindow.postMessage({ lampaBrowser: msg }, '*'); } catch (e) {}
+        };
+
+        var place = function () {
+            cursor.css({ left: x + 'px', top: y + 'px' }).toggleClass('hide', _this.mode !== 'mouse');
+        };
+
+        // Курсор ускоряется, если зажать или часто нажимать стрелку; упёрся в край — прокручиваем страницу.
+        var move = function (dir) {
+            var now = Date.now();
+            var unit = Math.max(window.innerWidth, 640) / 100;
+
+            streak = dir === lastDir && now - lastMove < 300 ? streak + 1 : 0;
+            lastDir = dir;
+            lastMove = now;
+
+            // Одиночное нажатие — точный шаг (~1% экрана), удержание — быстро разгоняется.
+            var step = Math.min(unit * (0.8 + streak * 0.9), unit * 8);
+            var dx = dir === 'left' ? -step : dir === 'right' ? step : 0;
+            var dy = dir === 'up' ? -step : dir === 'down' ? step : 0;
+            var nx = Math.max(0, Math.min(window.innerWidth - 1, x + dx));
+            var ny = Math.max(0, Math.min(window.innerHeight - 1, y + dy));
+
+            if (nx === x && ny === y) {
+                send({
+                    type: 'scroll',
+                    x: x / zoom,
+                    y: y / zoom,
+                    dx: (dx ? (dx > 0 ? 1 : -1) * window.innerWidth * 0.25 : 0) / zoom,
+                    dy: (dy ? (dy > 0 ? 1 : -1) * window.innerHeight * 0.25 : 0) / zoom
+                });
+                return;
+            }
+
+            x = nx;
+            y = ny;
+            place();
+            send({ type: 'move', x: x / zoom, y: y / zoom });
+        };
+
+        var click = function () {
+            cursor.addClass('click');
+            setTimeout(function () { cursor.removeClass('click'); }, 150);
+            send({ type: 'click', x: x / zoom, y: y / zoom });
+        };
+
+        // Нажатие пульта = keydown; keyup — когда кнопку перестали удерживать (повторы прекратились).
+        var key = function (k) {
+            var msg = { type: 'key', key: k.key, code: k.code, keyCode: k.keyCode };
+
+            send($.extend({ event: 'keydown', repeat: !!held[k.code] }, msg));
+            if (!held[k.code] && (k.keyCode === 13 || k.keyCode === 32)) send($.extend({ event: 'keypress' }, msg));
+
+            clearTimeout(held[k.code]);
+            held[k.code] = setTimeout(function () {
+                delete held[k.code];
+                send($.extend({ event: 'keyup' }, msg));
+            }, 200);
+        };
+
+        var renderMenu = function () {
+            menu.html(menuItems.map(function (item, i) {
+                return '<div class="lbrowser-frame__menu-item' + (i === menuIndex ? ' active' : '') + '">' + item.title + '</div>';
+            }).join(''));
+        };
+
+        var save = function (fields) {
+            Sites.update(site.id, fields);
+            for (var k in fields) site[k] = fields[k];
+        };
+
+        this.hint = function () {
+            return this.mode === 'mouse'
+                ? 'Стрелки — курсор &nbsp;·&nbsp; OK — клик &nbsp;·&nbsp; Назад — меню'
+                : 'Стрелки и OK — в игру &nbsp;·&nbsp; Назад — меню';
+        };
+
+        this.openMenu = function () {
+            menuItems = [
+                { title: 'Закрыть сайт', run: actions.close },
+                {
+                    title: 'Управление: ' + (_this.mode === 'mouse' ? 'мышь → переключить на клавиатуру' : 'клавиатура → переключить на мышь'),
+                    run: function () {
+                        _this.mode = _this.mode === 'mouse' ? 'keys' : 'mouse';
+                        save({ control: _this.mode });
+                        place();
+                        actions.hint(_this.hint());
+                    }
+                },
+                {
+                    title: 'Кнопка OK в режиме клавиатуры: ' + (_this.okKey === 'space' ? 'пробел' : 'Enter'),
+                    run: function () {
+                        _this.okKey = _this.okKey === 'space' ? 'enter' : 'space';
+                        save({ okKey: _this.okKey });
+                        actions.hint('OK теперь нажимает ' + (_this.okKey === 'space' ? 'пробел' : 'Enter'));
+                    }
+                },
+                { title: 'Обновить страницу', run: actions.reload }
+            ];
+
+            menuIndex = 0;
+            renderMenu();
+            menu.removeClass('hide');
+        };
+
+        this.handle = function (cmd) {
+            if (!menu.hasClass('hide')) {
+                if (cmd === 'up') menuIndex = Math.max(0, menuIndex - 1);
+                if (cmd === 'down') menuIndex = Math.min(menuItems.length - 1, menuIndex + 1);
+
+                if (cmd === 'enter') {
+                    menu.addClass('hide');
+                    menuItems[menuIndex].run();
+                } else {
+                    renderMenu();
+                }
+
+                return;
+            }
+
+            if (this.mode === 'mouse') {
+                if (cmd === 'enter') click();
+                else move(cmd);
+            } else {
+                key(cmd === 'enter' ? KEYS[this.okKey] : KEYS[cmd]);
+            }
+        };
+
+        this.back = function () {
+            if (menu.hasClass('hide')) this.openMenu();
+            else menu.addClass('hide');
+        };
+
+        // Клик по полю ввода: страница просит текст, вводим его клавиатурой Lampa.
+        var onMessage = function (e) {
+            var m = e.data && e.data.lampaBrowser;
+            if (m && m.type === 'inputRequest' && e.source === iframe.contentWindow) actions.input(m);
+        };
+
+        window.addEventListener('message', onMessage);
+
+        this.destroy = function () {
+            window.removeEventListener('message', onMessage);
+            for (var k in held) clearTimeout(held[k]);
+            held = {};
+        };
+
+        place();
+    }
+
+    /* ---------------------------------------------------------------- */
     /* Полноэкранный просмотр сайта (iframe поверх Lampa)               */
     /* ---------------------------------------------------------------- */
 
     var Frame = {
+        remote: null,
         el: null,
         timers: [],
         prevController: 'content',
@@ -313,23 +503,48 @@
 
             var zoom = site.zoom || 1;
             var size = (100 / zoom) + '%';
-            var hint = viaProxy
-                ? 'OK — управлять сайтом пультом &nbsp;·&nbsp; Назад — закрыть'
-                : 'OK — управлять сайтом &nbsp;·&nbsp; ▼ — через прокси &nbsp;·&nbsp; Назад — закрыть';
-
             this.el = $(
                 '<div class="lbrowser-frame">' +
                     '<iframe allow="autoplay; fullscreen; gamepad; encrypted-media; picture-in-picture" allowfullscreen></iframe>' +
                     '<div class="lbrowser-frame__loader">Загрузка ' + escapeHtml(hostOf(site.url)) + (viaProxy ? ' через прокси' : '') + '…</div>' +
-                    '<div class="lbrowser-frame__hint">' + hint + '</div>' +
+                    '<div class="lbrowser-frame__hint"></div>' +
                 '</div>'
             );
 
             var iframe = this.el.find('iframe');
             var hintEl = this.el.find('.lbrowser-frame__hint');
-            var hideHint = function (delay) {
-                _this.timers.push(setTimeout(function () { hintEl.addClass('hide'); }, delay));
+            var hintTimer;
+            var showHint = function (html, delay) {
+                clearTimeout(hintTimer);
+                hintEl.html(html).removeClass('hide');
+                hintTimer = setTimeout(function () { hintEl.addClass('hide'); }, delay);
+                _this.timers.push(hintTimer);
             };
+
+            if (viaProxy) {
+                this.remote = new RemoteControl(this.el, iframe[0], site, {
+                    close: function () { _this.close(); },
+                    reload: function () { iframe.attr('src', url); },
+                    hint: function (html) { showHint(html, 3000); },
+                    input: function (request) {
+                        // Клавиатура Lampa рисуется под нашим слоем — прячем его на время ввода.
+                        _this.el.hide();
+
+                        Lampa.Input.edit({
+                            title: 'Ввод текста',
+                            value: request.value || '',
+                            free: true,
+                            nosave: true
+                        }, function (value) {
+                            if (!_this.el || !_this.remote) return;
+
+                            _this.el.show();
+                            Lampa.Controller.toggle(FRAME_CONTROLLER);
+                            _this.remote.send({ type: 'input', value: value });
+                        });
+                    }
+                });
+            }
 
             iframe.css({
                 width: size,
@@ -346,15 +561,16 @@
                 _this.el.find('.lbrowser-frame__loader').remove();
 
                 if (!viaProxy && !hintEl.data('focused')) {
-                    hintEl.html('Белый экран? Нажмите ▼ — откроем через прокси').removeClass('hide');
-                    hideHint(10000);
+                    showHint('Белый экран? Нажмите ▼ — откроем через прокси', 10000);
                 }
             });
 
             $('body').append(this.el);
             iframe.attr('src', url);
 
-            hideHint(6000);
+            showHint(viaProxy
+                ? this.remote.hint()
+                : 'OK — управлять сайтом &nbsp;·&nbsp; ▼ — через прокси (мышь, пульт в играх) &nbsp;·&nbsp; Назад — закрыть', 6000);
 
             // Пересылаем геймпад в страницу: её принимает скрипт, который внедряет прокси.
             if (navigator.getGamepads) {
@@ -391,7 +607,27 @@
                 }
             }, 30000));
 
-            Lampa.Controller.add(FRAME_CONTROLLER, {
+            var remote = function (cmd) {
+                return function () {
+                    if (_this.remote) _this.remote.handle(cmd);
+                };
+            };
+
+            Lampa.Controller.add(FRAME_CONTROLLER, viaProxy ? {
+                toggle: function () {
+                    // Сюда Lampa возвращается и после своей клавиатуры, даже если ввод отменён.
+                    _this.el.show();
+                    Lampa.Controller.collectionSet(_this.el);
+                },
+                up: remote('up'),
+                down: remote('down'),
+                left: remote('left'),
+                right: remote('right'),
+                enter: remote('enter'),
+                back: function () {
+                    _this.remote.back();
+                }
+            } : {
                 toggle: function () {
                     Lampa.Controller.collectionSet(_this.el);
                 },
@@ -402,7 +638,6 @@
                 },
                 up: function () {},
                 down: function () {
-                    if (viaProxy) return;
                     if (!ProxyServer.get()) return Frame.open(site, true); // покажет, что прокси не настроен
 
                     Sites.update(site.id, { mode: 'proxy' });
@@ -430,6 +665,10 @@
             }
 
             this.timers = [];
+
+            if (this.remote) this.remote.destroy();
+            this.remote = null;
+
             this.el.find('iframe').attr('src', 'about:blank');
             this.el.remove();
             this.el = null;
@@ -814,6 +1053,14 @@
         '.lbrowser-frame__loader{position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);-webkit-transform:translateY(-50%);text-align:center;color:#fff;font-size:1.4em;line-height:1.5;padding:0 2em;pointer-events:none;text-shadow:0 0 .5em #000}' +
         '.lbrowser-frame__hint{position:absolute;left:50%;bottom:2em;transform:translateX(-50%);-webkit-transform:translateX(-50%);padding:.7em 1.4em;border-radius:2em;background:rgba(0,0,0,.8);color:#fff;font-size:1.1em;white-space:nowrap;transition:opacity .5s;pointer-events:none}' +
         '.lbrowser-frame__hint.hide{opacity:0}' +
+        '.lbrowser-frame__cursor{position:absolute;z-index:2;width:2.2em;height:2.2em;margin:-.15em 0 0 -.15em;pointer-events:none;transition:left .08s linear,top .08s linear;filter:drop-shadow(0 0 .2em rgba(0,0,0,.6))}' +
+        '.lbrowser-frame__cursor svg{width:100%;height:100%;transition:transform .1s}' +
+        '.lbrowser-frame__cursor.click svg{transform:scale(.75)}' +
+        '.lbrowser-frame__cursor.hide{display:none}' +
+        '.lbrowser-frame__menu{position:absolute;z-index:3;top:50%;left:50%;min-width:24em;transform:translate(-50%,-50%);-webkit-transform:translate(-50%,-50%);padding:1em;border-radius:1em;background:rgba(20,20,20,.95);color:#fff;font-size:1.2em}' +
+        '.lbrowser-frame__menu.hide{display:none}' +
+        '.lbrowser-frame__menu-item{padding:.7em 1em;border-radius:.6em}' +
+        '.lbrowser-frame__menu-item.active{background:#fff;color:#000}' +
         '.lbrowser-test{background:rgba(0,0,0,.95);color:#fff;overflow:auto}' +
         '.lbrowser-test__body{max-width:60em;margin:3em auto;padding:0 2em;font-size:1.2em;line-height:1.5}' +
         '.lbrowser-test__body p{margin:0 0 1em}' +

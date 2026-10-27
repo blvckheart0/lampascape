@@ -215,8 +215,55 @@ if(a.protocol==='https:'&&bare(a.host)===bare(c.host))return c.prefix+a.host+a.p
 var f=window.fetch;if(f)window.fetch=function(i,o){if(typeof i==='string'||(window.URL&&i instanceof URL))i=fix(String(i));else if(window.Request&&i instanceof Request&&fix(i.url)!==i.url)i=new Request(fix(i.url),i);return f.call(this,i,o)};
 var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=fix(String(u));return x.apply(this,arguments)};
 var w=window.open;window.open=function(u){if(u)arguments[0]=fix(String(u));return w.apply(this,arguments)};
-})(${config});</script><script>${GAMEPAD_RELAY}</script>`;
+})(${config});</script><script>${GAMEPAD_RELAY}</script><script>${REMOTE_RELAY}</script>`;
 }
+
+// Команды пульта из плагина (виртуальная мышь и клавиши) -> синтетические события на странице.
+// Если под курсором вложенный iframe, команда пересылается в него с пересчётом координат.
+const REMOTE_RELAY = `(function(){
+var lastFrame=null,pendingEl=null,pendingFrame=null,hoverEl=null;
+var post=function(w,m){try{w.postMessage({lampaBrowser:m},'*')}catch(e){}};
+var isFrame=function(el){return !!el&&(el.tagName==='IFRAME'||el.tagName==='FRAME')};
+var inner=function(el,x,y){var r=el.getBoundingClientRect(),s=getComputedStyle(el);
+return{x:x-r.left-(parseFloat(s.borderLeftWidth)||0)-(parseFloat(s.paddingLeft)||0),y:y-r.top-(parseFloat(s.borderTopWidth)||0)-(parseFloat(s.paddingTop)||0)}};
+var mouse=function(el,type,x,y,buttons){var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:x,clientY:y,screenX:x,screenY:y,button:0,buttons:buttons||0},ev;
+if(/^pointer/.test(type)){if(!window.PointerEvent)return;o.pointerId=1;o.pointerType='mouse';o.isPrimary=true;ev=new PointerEvent(type,o)}else ev=new MouseEvent(type,o);
+el.dispatchEvent(ev)};
+var isText=function(el){if(!el)return false;if(el.isContentEditable||el.tagName==='TEXTAREA')return true;
+return el.tagName==='INPUT'&&/^(text|search|email|url|tel|number|password|)$/i.test(el.getAttribute('type')||'')};
+var setValue=function(el,v){if(el.isContentEditable){el.textContent=v}else{var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value');if(d&&d.set)d.set.call(el,v);else el.value=v}
+el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))};
+var point=function(m){var x=m.x,y=m.y,el=document.elementFromPoint(x,y);if(!el)return;
+if(isFrame(el)){var p=inner(el,x,y);if(m.type==='click'){lastFrame=el;try{el.focus()}catch(e){}}return post(el.contentWindow,{type:m.type,x:p.x,y:p.y})}
+if(m.type==='move'){if(hoverEl!==el){if(hoverEl){mouse(hoverEl,'pointerout',x,y);mouse(hoverEl,'mouseout',x,y)}mouse(el,'pointerover',x,y);mouse(el,'mouseover',x,y);hoverEl=el}
+mouse(el,'pointermove',x,y);mouse(el,'mousemove',x,y);return}
+lastFrame=null;pendingEl=null;
+mouse(el,'pointerdown',x,y,1);mouse(el,'mousedown',x,y,1);
+var f=el.closest?el.closest('input,textarea,select,button,a,[tabindex],[contenteditable]'):null;
+if(f&&f.focus)f.focus();
+mouse(el,'pointerup',x,y);mouse(el,'mouseup',x,y);mouse(el,'click',x,y);
+if(isText(f)){pendingEl=f;post(window.parent,{type:'inputRequest',value:f.isContentEditable?f.textContent:f.value})}};
+var key=function(m){var t=document.activeElement;
+if(isFrame(t))return post(t.contentWindow,m);
+if((!t||t===document.body)&&lastFrame&&document.contains(lastFrame))return post(lastFrame.contentWindow,m);
+t=t||document.body;
+var ev=new KeyboardEvent(m.event,{key:m.key,code:m.code,repeat:!!m.repeat,bubbles:true,cancelable:true,composed:true,view:window});
+var kc=m.event==='keypress'?(m.keyCode===32?32:13):m.keyCode;
+['keyCode','which','charCode'].forEach(function(p){try{Object.defineProperty(ev,p,{get:function(){return p==='charCode'&&m.event!=='keypress'?0:kc}})}catch(e){}});
+t.dispatchEvent(ev);
+if(m.event==='keydown'&&m.keyCode===13&&!ev.defaultPrevented){if(t.tagName==='A'||t.tagName==='BUTTON')t.click();else if(t.form&&t.tagName==='INPUT'){if(t.form.requestSubmit)t.form.requestSubmit();else t.form.submit()}}};
+var scroll=function(m){var el=document.elementFromPoint(m.x,m.y);
+if(isFrame(el)){var p=inner(el,m.x,m.y);return post(el.contentWindow,{type:'scroll',x:p.x,y:p.y,dx:m.dx,dy:m.dy})}
+for(;el&&el!==document.body&&el!==document.documentElement;el=el.parentElement){var s=getComputedStyle(el);
+if(/(auto|scroll)/.test(s.overflowY+s.overflowX)&&(el.scrollHeight>el.clientHeight||el.scrollWidth>el.clientWidth)){var t=el.scrollTop,l=el.scrollLeft;el.scrollBy(m.dx,m.dy);if(el.scrollTop!==t||el.scrollLeft!==l)return}}
+window.scrollBy(m.dx,m.dy)};
+window.addEventListener('message',function(e){var m=e.data&&e.data.lampaBrowser;if(!m)return;
+if(e.source===window.parent){
+if(m.type==='move'||m.type==='click')point(m);else if(m.type==='key')key(m);else if(m.type==='scroll')scroll(m);
+else if(m.type==='input'){if(pendingFrame){post(pendingFrame,m);pendingFrame=null}else if(pendingEl&&typeof m.value==='string'){setValue(pendingEl,m.value);pendingEl=null}}
+}else if(m.type==='inputRequest'){pendingFrame=e.source;pendingEl=null;post(window.parent,m)}
+});
+})();`;
 
 // Плагин пересылает состояние геймпадов из Lampa (postMessage), потому что встроенные страницы
 // часто не видят геймпад сами. Здесь оно превращается в обычный Gamepad API и передаётся во вложенные iframe.
