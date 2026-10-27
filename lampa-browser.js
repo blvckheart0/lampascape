@@ -173,6 +173,103 @@
     }
 
     /* ---------------------------------------------------------------- */
+    /* Геймпады                                                          */
+    /* ---------------------------------------------------------------- */
+
+    // Снимок подключённых геймпадов в виде, пригодном для postMessage.
+    function readGamepads() {
+        var list = [];
+        var raw;
+
+        try { raw = navigator.getGamepads ? navigator.getGamepads() : []; } catch (e) { raw = []; }
+
+        for (var i = 0; i < (raw ? raw.length : 0); i++) {
+            var p = raw[i];
+            if (!p || !p.connected) continue;
+
+            var buttons = [];
+            var axes = [];
+
+            for (var b = 0; b < p.buttons.length; b++) {
+                buttons.push([p.buttons[b].pressed ? 1 : 0, Math.round(p.buttons[b].value * 1000) / 1000]);
+            }
+
+            for (var a = 0; a < p.axes.length; a++) axes.push(Math.round(p.axes[a] * 1000) / 1000);
+
+            list.push({ index: p.index, id: p.id, mapping: p.mapping, buttons: buttons, axes: axes });
+        }
+
+        return list;
+    }
+
+    var GamepadTest = {
+        el: null,
+        keys: [],
+        timer: null,
+
+        onKey: function (e) {
+            GamepadTest.keys.unshift((e.key || '?') + ' (' + e.keyCode + ')');
+            GamepadTest.keys.length = Math.min(GamepadTest.keys.length, 8);
+        },
+
+        open: function () {
+            var _this = this;
+            var prev = (Lampa.Controller.enabled() || {}).name || 'content';
+
+            this.keys = [];
+            this.el = $('<div class="lbrowser-frame lbrowser-test"><div class="lbrowser-test__body"></div></div>');
+            $('body').append(this.el);
+
+            window.addEventListener('keydown', this.onKey, true);
+            this.timer = setInterval(function () { _this.render(); }, 100);
+            this.render();
+
+            Lampa.Controller.add('lampa_browser_test', {
+                toggle: function () { Lampa.Controller.collectionSet(_this.el); },
+                up: function () {}, down: function () {}, left: function () {}, right: function () {}, enter: function () {},
+                back: function () {
+                    clearInterval(_this.timer);
+                    window.removeEventListener('keydown', _this.onKey, true);
+                    _this.el.remove();
+                    _this.el = null;
+                    Lampa.Controller.toggle(prev);
+                }
+            });
+
+            Lampa.Controller.toggle('lampa_browser_test');
+        },
+
+        render: function () {
+            if (!this.el) return;
+
+            var pads = readGamepads();
+            var rows = [
+                '<h2>Проверка геймпада</h2>',
+                '<p><b>Gamepad API:</b> ' + (navigator.getGamepads ? 'есть' : 'нет') + '</p>'
+            ];
+
+            if (!pads.length) {
+                rows.push('<p><b>Геймпады:</b> не видны. Нажмите любую кнопку на геймпаде — браузер показывает его только после нажатия.</p>');
+            }
+
+            pads.forEach(function (p) {
+                var pressed = [];
+                p.buttons.forEach(function (b, i) { if (b[0]) pressed.push(i); });
+
+                rows.push('<p><b>#' + p.index + ' ' + escapeHtml(p.id) + '</b> (' + escapeHtml(p.mapping || 'без раскладки') + ')<br>' +
+                    'нажаты кнопки: ' + (pressed.length ? pressed.join(', ') : '—') + '<br>' +
+                    'оси: ' + p.axes.map(function (a) { return a.toFixed(2); }).join(' ') + '</p>');
+            });
+
+            rows.push('<p><b>Нажатия клавиш, которые получает Lampa:</b><br>' + (this.keys.length ? escapeHtml(this.keys.join(', ')) : '—') + '</p>');
+            rows.push('<p class="lbrowser-test__ua">' + escapeHtml(navigator.userAgent) + '</p>');
+            rows.push('<p>Назад — закрыть</p>');
+
+            this.el.find('.lbrowser-test__body').html(rows.join(''));
+        }
+    };
+
+    /* ---------------------------------------------------------------- */
     /* Полноэкранный просмотр сайта (iframe поверх Lampa)               */
     /* ---------------------------------------------------------------- */
 
@@ -212,7 +309,7 @@
 
             this.el = $(
                 '<div class="lbrowser-frame">' +
-                    '<iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>' +
+                    '<iframe allow="autoplay; fullscreen; gamepad; encrypted-media; picture-in-picture" allowfullscreen></iframe>' +
                     '<div class="lbrowser-frame__loader">Загрузка ' + escapeHtml(hostOf(site.url)) + (viaProxy ? ' через прокси' : '') + '…</div>' +
                     '<div class="lbrowser-frame__hint">' + hint + '</div>' +
                 '</div>'
@@ -248,6 +345,25 @@
             iframe.attr('src', url);
 
             hideHint(6000);
+
+            // Пересылаем геймпад в страницу: её принимает скрипт, который внедряет прокси.
+            if (navigator.getGamepads) {
+                var lastState = '';
+                var lastSent = 0;
+
+                this.timers.push(setInterval(function () {
+                    var pads = readGamepads();
+                    var state = JSON.stringify(pads);
+                    var now = Date.now();
+
+                    if (state === lastState && now - lastSent < 1000) return;
+
+                    lastState = state;
+                    lastSent = now;
+
+                    try { iframe[0].contentWindow.postMessage({ lampaBrowserGamepads: pads }, '*'); } catch (e) {}
+                }, 16));
+            }
 
             this.timers.push(setTimeout(function () {
                 var loader = _this.el && _this.el.find('.lbrowser-frame__loader');
@@ -391,6 +507,23 @@
             });
 
             body.append(proxyCard);
+
+            var padCard = $(
+                '<div class="lbrowser__card selector">' +
+                    '<div class="lbrowser__icon"><span>🎮</span></div>' +
+                    '<div class="lbrowser__name">Геймпад</div>' +
+                    '<div class="lbrowser__url">проверка</div>' +
+                '</div>'
+            );
+
+            padCard.on('hover:focus', function () {
+                last = padCard[0];
+                scroll.update(padCard, true);
+            }).on('hover:enter', function () {
+                GamepadTest.open();
+            });
+
+            body.append(padCard);
 
             if (focusId === 'add') last = add[0];
             if (focusId === 'proxy') last = proxyCard[0];
@@ -670,7 +803,11 @@
         '.lbrowser-frame iframe{position:absolute;top:0;left:0;border:0;background:#fff;transform-origin:0 0;-webkit-transform-origin:0 0}' +
         '.lbrowser-frame__loader{position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);-webkit-transform:translateY(-50%);text-align:center;color:#fff;font-size:1.4em;line-height:1.5;padding:0 2em;pointer-events:none;text-shadow:0 0 .5em #000}' +
         '.lbrowser-frame__hint{position:absolute;left:50%;bottom:2em;transform:translateX(-50%);-webkit-transform:translateX(-50%);padding:.7em 1.4em;border-radius:2em;background:rgba(0,0,0,.8);color:#fff;font-size:1.1em;white-space:nowrap;transition:opacity .5s;pointer-events:none}' +
-        '.lbrowser-frame__hint.hide{opacity:0}';
+        '.lbrowser-frame__hint.hide{opacity:0}' +
+        '.lbrowser-test{background:rgba(0,0,0,.95);color:#fff;overflow:auto}' +
+        '.lbrowser-test__body{max-width:60em;margin:3em auto;padding:0 2em;font-size:1.2em;line-height:1.5}' +
+        '.lbrowser-test__body p{margin:0 0 1em}' +
+        '.lbrowser-test__ua{opacity:.5;font-size:.8em}';
 
     function init() {
         Lampa.Component.add(COMPONENT, BrowserComponent);

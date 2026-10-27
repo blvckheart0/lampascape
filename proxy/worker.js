@@ -192,6 +192,15 @@ function rewriteHtml(response, ctx) {
         });
     }
 
+    // Вложенным iframe (сами игры) нужен доступ к геймпаду и полноэкранному режиму.
+    rewriter.on('iframe', {
+        element(el) {
+            const allow = el.getAttribute('allow') || '';
+            const missing = ['gamepad', 'autoplay', 'fullscreen'].filter(f => !new RegExp(`\\b${f}\\b`).test(allow));
+            if (missing.length) el.setAttribute('allow', [allow, ...missing].filter(Boolean).join('; '));
+        }
+    });
+
     return rewriter.transform(response);
 }
 
@@ -206,8 +215,32 @@ if(a.protocol==='https:'&&bare(a.host)===bare(c.host))return c.prefix+a.host+a.p
 var f=window.fetch;if(f)window.fetch=function(i,o){if(typeof i==='string'||(window.URL&&i instanceof URL))i=fix(String(i));else if(window.Request&&i instanceof Request&&fix(i.url)!==i.url)i=new Request(fix(i.url),i);return f.call(this,i,o)};
 var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=fix(String(u));return x.apply(this,arguments)};
 var w=window.open;window.open=function(u){if(u)arguments[0]=fix(String(u));return w.apply(this,arguments)};
-})(${config});</script>`;
+})(${config});</script><script>${GAMEPAD_RELAY}</script>`;
 }
+
+// Плагин пересылает состояние геймпадов из Lampa (postMessage), потому что встроенные страницы
+// часто не видят геймпад сами. Здесь оно превращается в обычный Gamepad API и передаётся во вложенные iframe.
+const GAMEPAD_RELAY = `(function(){
+var pads=[],real=navigator.getGamepads?navigator.getGamepads.bind(navigator):null;
+var realPads=function(){try{var r=real?real():[];for(var i=0;i<(r?r.length:0);i++)if(r[i])return r}catch(e){}return null};
+try{Object.defineProperty(navigator,'getGamepads',{configurable:true,value:function(){
+var r=realPads();if(r)return r;var out=[null,null,null,null];for(var i=0;i<pads.length;i++)out[pads[i].index]=pads[i];return out}})}catch(e){}
+var fire=function(type,g){if(realPads())return;var ev=new Event(type);try{Object.defineProperty(ev,'gamepad',{value:g})}catch(e){}window.dispatchEvent(ev)};
+window.addEventListener('message',function(e){
+if(e.source!==window.parent||!e.data||!e.data.lampaBrowserGamepads)return;
+var next=e.data.lampaBrowserGamepads.map(function(p){
+var g=null;for(var i=0;i<pads.length;i++)if(pads[i].index===p.index)g=pads[i];
+var raw=JSON.stringify([p.buttons,p.axes]),fresh=!g;
+g=g||{id:p.id,index:p.index,mapping:p.mapping||'standard',connected:true,timestamp:0,hapticActuators:[],vibrationActuator:null};
+if(fresh||g._raw!==raw){g._raw=raw;g.timestamp=performance.now();g.axes=p.axes;
+g.buttons=p.buttons.map(function(b){return{pressed:!!b[0],touched:!!b[0],value:b[1]}})}
+return g});
+next.forEach(function(g){if(pads.indexOf(g)<0)fire('gamepadconnected',g)});
+pads.forEach(function(g){if(next.indexOf(g)<0){g.connected=false;fire('gamepaddisconnected',g)}});
+pads=next;
+var f=document.getElementsByTagName('iframe');for(var i=0;i<f.length;i++)try{f[i].contentWindow.postMessage(e.data,'*')}catch(x){}
+});
+})();`;
 
 // Ссылка из HTML -> адрес через прокси.
 function rewriteUrl(value, ctx, anyHost) {
