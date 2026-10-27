@@ -1,0 +1,6 @@
+name = "lampa-proxy"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+# Секретный токен задаётся командой (в репозиторий он не попадает):
+#   npx wrangler secret put TOKEN

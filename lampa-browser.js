@@ -12,6 +12,7 @@
     window.lampa_browser_plugin = true;
 
     var STORAGE_KEY = 'lampa_browser_sites';
+    var PROXY_KEY = 'lampa_browser_proxy';
     var COMPONENT = 'lampa_browser';
     var FRAME_CONTROLLER = 'lampa_browser_frame';
     var ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -71,6 +72,31 @@
             list.splice(to, 0, item);
             this.save(list);
         }
+    };
+
+    /* ---------------------------------------------------------------- */
+    /* Прокси для сайтов, запрещающих встраивание (см. proxy/worker.js) */
+    /* ---------------------------------------------------------------- */
+
+    var ProxyServer = {
+        // Адрес вида https://lampa-proxy.<имя>.workers.dev/<ТОКЕН>
+        get: function () {
+            return String(Lampa.Storage.get(PROXY_KEY, '') || '').replace(/\/+$/, '');
+        },
+        set: function (value) {
+            Lampa.Storage.set(PROXY_KEY, value);
+        },
+        wrap: function (url) {
+            var base = this.get();
+            var m = /^https:\/\/(.+)$/i.exec(url);
+            return base && m ? base + '/' + m[1] : '';
+        }
+    };
+
+    var MODES = {
+        frame: 'внутри Lampa',
+        proxy: 'через прокси',
+        external: 'во внешнем браузере'
     };
 
     /* ---------------------------------------------------------------- */
@@ -155,24 +181,48 @@
         timers: [],
         prevController: 'content',
 
-        open: function (site) {
+        changed: false,
+        onclose: null,
+
+        open: function (site, viaProxy) {
             var _this = this;
+            var url = viaProxy ? ProxyServer.wrap(site.url) : site.url;
+
+            if (!url) {
+                Lampa.Noty.show(ProxyServer.get()
+                    ? 'Через прокси открываются только адреса https://'
+                    : 'Сначала укажите адрес прокси: карточка «Прокси» на экране «Браузер»');
+                return;
+            }
+
+            var reopen = !!this.el;
 
             this.close(true);
-            this.prevController = (Lampa.Controller.enabled() || {}).name || 'content';
+
+            if (!reopen) {
+                this.prevController = (Lampa.Controller.enabled() || {}).name || 'content';
+                this.changed = false;
+            }
 
             var zoom = site.zoom || 1;
             var size = (100 / zoom) + '%';
+            var hint = viaProxy
+                ? 'OK — управлять сайтом пультом &nbsp;·&nbsp; Назад — закрыть'
+                : 'OK — управлять сайтом &nbsp;·&nbsp; ▼ — через прокси &nbsp;·&nbsp; Назад — закрыть';
 
             this.el = $(
                 '<div class="lbrowser-frame">' +
                     '<iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>' +
-                    '<div class="lbrowser-frame__loader">Загрузка ' + escapeHtml(hostOf(site.url)) + '…</div>' +
-                    '<div class="lbrowser-frame__hint">OK — управлять сайтом пультом &nbsp;·&nbsp; Назад — закрыть</div>' +
+                    '<div class="lbrowser-frame__loader">Загрузка ' + escapeHtml(hostOf(site.url)) + (viaProxy ? ' через прокси' : '') + '…</div>' +
+                    '<div class="lbrowser-frame__hint">' + hint + '</div>' +
                 '</div>'
             );
 
             var iframe = this.el.find('iframe');
+            var hintEl = this.el.find('.lbrowser-frame__hint');
+            var hideHint = function (delay) {
+                _this.timers.push(setTimeout(function () { hintEl.addClass('hide'); }, delay));
+            };
 
             iframe.css({
                 width: size,
@@ -181,23 +231,30 @@
                 '-webkit-transform': 'scale(' + zoom + ')'
             });
 
+            // Если сайт запрещает встраивание (X-Frame-Options / CSP), iframe «загрузится» пустым,
+            // а надёжно определить это из кода нельзя — поэтому после загрузки напоминаем про прокси.
             iframe.on('load', function () {
-                _this.el && _this.el.find('.lbrowser-frame__loader').remove();
+                if (!_this.el) return;
+
+                _this.el.find('.lbrowser-frame__loader').remove();
+
+                if (!viaProxy && !hintEl.data('focused')) {
+                    hintEl.html('Белый экран? Нажмите ▼ — откроем через прокси').removeClass('hide');
+                    hideHint(10000);
+                }
             });
 
             $('body').append(this.el);
-            iframe.attr('src', site.url);
+            iframe.attr('src', url);
 
-            // Если сайт запрещает встраивание (X-Frame-Options / CSP), iframe останется пустым,
-            // а надёжно определить это из кода нельзя — подсказываем альтернативу.
-            this.timers.push(setTimeout(function () {
-                _this.el && _this.el.find('.lbrowser-frame__hint').addClass('hide');
-            }, 6000));
+            hideHint(6000);
 
             this.timers.push(setTimeout(function () {
                 var loader = _this.el && _this.el.find('.lbrowser-frame__loader');
                 if (loader && loader.length) {
-                    loader.html('Сайт долго не отвечает или запрещает встраивание.<br>Нажмите Назад и откройте его во внешнем браузере (долгое нажатие на карточку).');
+                    loader.html(viaProxy
+                        ? 'Сайт долго не отвечает. Нажмите Назад и попробуйте позже.'
+                        : 'Сайт долго не отвечает или запрещает встраивание.<br>Нажмите ▼, чтобы открыть его через прокси.');
                 }
             }, 15000));
 
@@ -213,12 +270,21 @@
                     Lampa.Controller.collectionSet(_this.el);
                 },
                 enter: function () {
-                    _this.el.find('.lbrowser-frame__hint').addClass('hide');
+                    hintEl.data('focused', true).addClass('hide');
                     iframe[0].focus();
                     try { iframe[0].contentWindow.focus(); } catch (e) {}
                 },
                 up: function () {},
-                down: function () {},
+                down: function () {
+                    if (viaProxy) return;
+                    if (!ProxyServer.get()) return Frame.open(site, true); // покажет, что прокси не настроен
+
+                    Sites.update(site.id, { mode: 'proxy' });
+                    site.mode = 'proxy';
+                    _this.changed = true;
+                    Lampa.Noty.show('Теперь этот сайт открывается через прокси');
+                    _this.open(site, true);
+                },
                 left: function () {},
                 right: function () {},
                 back: function () {
@@ -242,13 +308,20 @@
             this.el.remove();
             this.el = null;
 
-            if (!silent) Lampa.Controller.toggle(this.prevController);
+            if (silent) return;
+
+            if (this.onclose) this.onclose(this.changed);
+            this.onclose = null;
+
+            Lampa.Controller.toggle(this.prevController);
         }
     };
 
-    function openSite(site, external) {
-        if (external || site.mode === 'external') openExternal(site.url);
-        else Frame.open(site);
+    function openSite(site, mode) {
+        mode = mode || site.mode;
+
+        if (mode === 'external') openExternal(site.url);
+        else Frame.open(site, mode === 'proxy');
     }
 
     /* ---------------------------------------------------------------- */
@@ -301,7 +374,43 @@
 
             body.append(add);
 
+            var proxy = ProxyServer.get();
+            var proxyCard = $(
+                '<div class="lbrowser__card selector">' +
+                    '<div class="lbrowser__icon"><span>⇄</span></div>' +
+                    '<div class="lbrowser__name">Прокси</div>' +
+                    '<div class="lbrowser__url">' + (proxy ? escapeHtml(hostOf(proxy)) : 'не настроен') + '</div>' +
+                '</div>'
+            );
+
+            proxyCard.on('hover:focus', function () {
+                last = proxyCard[0];
+                scroll.update(proxyCard, true);
+            }).on('hover:enter', function () {
+                _this.editProxy();
+            });
+
+            body.append(proxyCard);
+
             if (focusId === 'add') last = add[0];
+            if (focusId === 'proxy') last = proxyCard[0];
+        };
+
+        this.open = function (site, mode) {
+            Frame.onclose = function (changed) {
+                if (changed) _this.build(site.id);
+            };
+
+            openSite(site, mode);
+        };
+
+        this.editProxy = function () {
+            input('Адрес прокси: https://….workers.dev/ТОКЕН (пусто — отключить)', ProxyServer.get(), function (value) {
+                value = normalizeUrl(value).replace(/\/+$/, '');
+                ProxyServer.set(value);
+                Lampa.Noty.show(value ? 'Прокси сохранён' : 'Прокси отключён');
+                _this.refresh('proxy');
+            });
         };
 
         this.card = function (site) {
@@ -312,7 +421,7 @@
                 '<div class="lbrowser__card selector">' +
                     '<div class="lbrowser__icon"><span>' + letter + '</span></div>' +
                     '<div class="lbrowser__name">' + escapeHtml(site.title || host) + '</div>' +
-                    '<div class="lbrowser__url">' + escapeHtml(host) + (site.mode === 'external' ? ' · внешний' : '') + '</div>' +
+                    '<div class="lbrowser__url">' + escapeHtml(host) + ({ proxy: ' · прокси', external: ' · внешний' }[site.mode] || '') + '</div>' +
                 '</div>'
             );
 
@@ -331,7 +440,7 @@
                 last = card[0];
                 scroll.update(card, true);
             }).on('hover:enter', function () {
-                openSite(site);
+                _this.open(site);
             }).on('hover:long', function () {
                 _this.menu(site);
             });
@@ -361,22 +470,29 @@
         };
 
         this.menu = function (site) {
-            var external = site.mode === 'external';
+            var mode = site.mode || 'frame';
+            var items = [{ title: 'Открыть', action: 'open' }];
+
+            for (var key in MODES) {
+                // На Apple TV нет внешнего браузера.
+                if (key === mode || (key === 'external' && Lampa.Platform.is('apple_tv'))) continue;
+                items.push({ title: 'Открыть ' + MODES[key], action: 'open_as', mode: key });
+            }
+
+            items = items.concat([
+                { title: 'По умолчанию: ' + MODES[mode], subtitle: 'Нажмите, чтобы изменить', action: 'mode' },
+                { title: 'Масштаб: ' + Math.round((site.zoom || 1) * 100) + '%', action: 'zoom' },
+                { title: 'Переименовать', action: 'rename' },
+                { title: 'Изменить адрес', subtitle: site.url, action: 'url' },
+                { title: 'Переместить в начало', action: 'first' },
+                { title: 'Сдвинуть влево', action: 'left' },
+                { title: 'Сдвинуть вправо', action: 'right' },
+                { title: 'Удалить', action: 'delete' }
+            ]);
 
             Lampa.Select.show({
                 title: site.title,
-                items: [
-                    { title: 'Открыть', action: 'open' },
-                    { title: external ? 'Открыть внутри Lampa' : 'Открыть во внешнем браузере', action: 'open_other' },
-                    { title: 'По умолчанию: ' + (external ? 'внешний браузер' : 'внутри Lampa'), subtitle: 'Нажмите, чтобы переключить', action: 'mode' },
-                    { title: 'Масштаб: ' + Math.round((site.zoom || 1) * 100) + '%', action: 'zoom' },
-                    { title: 'Переименовать', action: 'rename' },
-                    { title: 'Изменить адрес', subtitle: site.url, action: 'url' },
-                    { title: 'Переместить в начало', action: 'first' },
-                    { title: 'Сдвинуть влево', action: 'left' },
-                    { title: 'Сдвинуть вправо', action: 'right' },
-                    { title: 'Удалить', action: 'delete' }
-                ],
+                items: items,
                 onBack: function () {
                     Lampa.Controller.toggle('content');
                 },
@@ -385,15 +501,13 @@
 
                     switch (item.action) {
                         case 'open':
-                            openSite(site);
+                            _this.open(site);
                             break;
-                        case 'open_other':
-                            if (external) Frame.open(site);
-                            else openExternal(site.url);
+                        case 'open_as':
+                            _this.open(site, item.mode);
                             break;
                         case 'mode':
-                            Sites.update(site.id, { mode: external ? 'frame' : 'external' });
-                            _this.refresh(site.id);
+                            _this.modeMenu(site);
                             break;
                         case 'zoom':
                             _this.zoomMenu(site);
@@ -427,6 +541,31 @@
                             _this.confirmDelete(site);
                             break;
                     }
+                }
+            });
+        };
+
+        this.modeMenu = function (site) {
+            var items = [];
+
+            for (var key in MODES) {
+                if (key === 'external' && Lampa.Platform.is('apple_tv')) continue;
+                items.push({ title: 'Открывать ' + MODES[key], mode: key, selected: key === (site.mode || 'frame') });
+            }
+
+            Lampa.Select.show({
+                title: 'Как открывать сайт',
+                items: items,
+                onBack: function () {
+                    Lampa.Controller.toggle('content');
+                },
+                onSelect: function (item) {
+                    if (item.mode === 'proxy' && !ProxyServer.get()) {
+                        Lampa.Noty.show('Сначала укажите адрес прокси: карточка «Прокси»');
+                    }
+
+                    Sites.update(site.id, { mode: item.mode });
+                    _this.refresh(site.id);
                 }
             });
         };
