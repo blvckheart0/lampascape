@@ -217,6 +217,7 @@
             var prev = (Lampa.Controller.enabled() || {}).name || 'content';
 
             this.keys = [];
+            this.commands = [];
             this.el = $('<div class="lbrowser-frame lbrowser-test"><div class="lbrowser-test__body"></div></div>');
             $('body').append(this.el);
 
@@ -224,9 +225,17 @@
             this.timer = setInterval(function () { _this.render(); }, 100);
             this.render();
 
+            // Команды пульта, которые Lampa получает в обход DOM-событий (например, от приложения Apple TV).
+            var log = function (name) {
+                return function () {
+                    _this.commands.unshift(name);
+                    _this.commands.length = Math.min(_this.commands.length, 8);
+                };
+            };
+
             Lampa.Controller.add('lampa_browser_test', {
                 toggle: function () { Lampa.Controller.collectionSet(_this.el); },
-                up: function () {}, down: function () {}, left: function () {}, right: function () {}, enter: function () {},
+                up: log('вверх'), down: log('вниз'), left: log('влево'), right: log('вправо'), enter: log('OK'),
                 back: function () {
                     clearInterval(_this.timer);
                     window.removeEventListener('keydown', _this.onKey, true);
@@ -262,6 +271,7 @@
             });
 
             rows.push('<p><b>Нажатия клавиш, которые получает Lampa:</b><br>' + (this.keys.length ? escapeHtml(this.keys.join(', ')) : '—') + '</p>');
+            rows.push('<p><b>Команды пульта в Lampa:</b><br>' + (this.commands.length ? this.commands.join(', ') : '—') + '</p>');
             rows.push('<p class="lbrowser-test__ua">' + escapeHtml(navigator.userAgent) + '</p>');
             rows.push('<p>Назад — закрыть</p>');
 
