@@ -38,10 +38,15 @@ const HOST_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?$/i;
 
 export default {
     async fetch(request, env) {
-        const token = env.TOKEN;
+        const token = (env.TOKEN || '').trim();
 
-        if (!token || !/^[A-Za-z0-9_-]{8,}$/.test(token)) {
-            return text('Задайте секрет TOKEN (не короче 8 символов: буквы, цифры, _ и -)', 500);
+        if (!/^[A-Za-z0-9_-]{8,}$/.test(token)) {
+            const problem = !token ? 'секрет TOKEN не задан'
+                : token.length < 8 ? `в TOKEN ${token.length} симв., нужно не меньше 8`
+                : /[^\x00-\x7f]/.test(token) ? 'в TOKEN есть не латинские символы (например, русская раскладка)'
+                : 'в TOKEN есть недопустимые символы (пробелы, знаки препинания)';
+
+            return text(`Прокси не настроен: ${problem}. Допустимы латинские буквы, цифры, _ и -.`, 500);
         }
 
         const url = new URL(request.url);
